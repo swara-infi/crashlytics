@@ -1,0 +1,37 @@
+[
+  {
+    "issueId": "CRASH-001",
+    "exception": "NullPointerException",
+    "message": "Attempt to invoke method on a null object reference",
+    "file": "LoginViewModel.kt",
+    "line": 45,
+    "stackTrace": [
+      "LoginViewModel.kt:45",
+      "LoginScreen.kt:22"
+    ]
+  },
+  {
+    "issueId": "CRASH-002",
+    "exception": "IllegalStateException",
+    "message": "Fragment not attached to a context",
+    "file": "HomeFragment.kt",
+    "line": 78,
+    "stackTrace": [
+      "HomeFragment.kt:78",
+      "MainActivity.kt:34",
+      "Activity.java:8921"
+    ]
+  },
+  {
+    "issueId": "CRASH-003",
+    "exception": "OutOfMemoryError",
+    "message": "Failed to allocate a byte allocation",
+    "file": "ImageLoader.kt",
+    "line": 112,
+    "stackTrace": [
+      "ImageLoader.kt:112",
+      "GalleryAdapter.kt:56",
+      "RecyclerView.java:5450"
+    ]
+  }
+]

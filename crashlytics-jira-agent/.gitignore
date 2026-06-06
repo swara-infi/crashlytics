@@ -1,0 +1,10 @@
+venv/
+__pycache__/
+*.pyc
+.env
+service-account.json
+config/google-services.json
+.pytest_cache/
+*.egg-info/
+dist/
+build/

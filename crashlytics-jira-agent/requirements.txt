@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+python-dotenv
+jira
+sqlalchemy
+psycopg2-binary
+firebase-admin
+apscheduler
+pydantic
+requests
