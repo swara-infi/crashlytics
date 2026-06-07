@@ -1,0 +1,7 @@
+This commit addresses the NullPointerException reported in MOB-37 by updating the `ValueError` message when the `JIRA_URL` environment variable is not found.
+
+**Change:**
+- Old message: "JIRA_URL environment variable is not set"
+- New message: "Missing JIRA_URL environment variable. Please configure it in your settings."
+
+The updated message provides clearer guidance to the user.
