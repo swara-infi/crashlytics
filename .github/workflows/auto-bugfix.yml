@@ -1,14 +1,18 @@
 name: Bugfix Branch — Jira Fetch & Gemini Auto-Fix
 
 on:
+  workflow_dispatch:
+    inputs:
+      branch_name:
+        description: "Bugfix branch name (e.g. bugfix/MOB-29)"
+        required: false
+        default: "bugfix/MOB-29"
   push:
     branches:
       - "bugfix/**"
 
 jobs:
   gemini-autofix:
-    # Only run on the very first push (branch creation) — no commits on top of it yet
-    if: ${{ github.event.created == true }}
     runs-on: ubuntu-latest
 
     permissions:
@@ -16,18 +20,32 @@ jobs:
       pull-requests: write   # open the PR
 
     steps:
-      # ── 1. Checkout ────────────────────────────────────────────────────────
+      # ── 1. Resolve branch name ─────────────────────────────────────────────
+      # For workflow_dispatch: use the input; for push: use the pushed branch
+      - name: Resolve branch name
+        id: branch
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            BRANCH="${{ github.event.inputs.branch_name }}"
+          else
+            BRANCH="${GITHUB_REF_NAME}"
+          fi
+          echo "name=$BRANCH" >> "$GITHUB_OUTPUT"
+          echo "✅ Branch resolved: $BRANCH"
+
+      # ── 2. Checkout ────────────────────────────────────────────────────────
       - name: Checkout branch
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0      # full history so we can diff against main/master
+          ref: ${{ steps.branch.outputs.name }}
+          fetch-depth: 0
 
-      # ── 2. Parse ticket number from branch name ─────────────────────────
+      # ── 3. Parse ticket number from branch name ────────────────────────────
       - name: Extract Jira ticket ID
         id: ticket
         run: |
-          BRANCH="${GITHUB_REF_NAME}"               # e.g. bugfix/PROJ-123
-          TICKET="${BRANCH#bugfix/}"                # strip prefix → PROJ-123
+          BRANCH="${{ steps.branch.outputs.name }}"
+          TICKET="${BRANCH#bugfix/}"                # strip prefix → MOB-29
 
           if [[ ! "$TICKET" =~ ^[A-Z]+-[0-9]+$ ]]; then
             echo "::error::Branch '$BRANCH' does not contain a valid Jira ticket (expected bugfix/PROJ-123)"
@@ -37,14 +55,14 @@ jobs:
           echo "id=$TICKET" >> "$GITHUB_OUTPUT"
           echo "✅ Ticket extracted: $TICKET"
 
-      # ── 3. Fetch Jira ticket description ───────────────────────────────
+      # ── 4. Fetch Jira ticket description ───────────────────────────────────
       - name: Fetch Jira ticket
         id: jira
         env:
-          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}    # e.g. https://yourorg.atlassian.net
-          JIRA_EMAIL:    ${{ secrets.JIRA_EMAIL }}
+          JIRA_BASE_URL:  ${{ secrets.JIRA_BASE_URL }}
+          JIRA_EMAIL:     ${{ secrets.JIRA_EMAIL }}
           JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
-          TICKET_ID:     ${{ steps.ticket.outputs.id }}
+          TICKET_ID:      ${{ steps.ticket.outputs.id }}
         run: |
           RESPONSE=$(curl -s -u "$JIRA_EMAIL:$JIRA_API_TOKEN" \
             -H "Accept: application/json" \
@@ -58,11 +76,10 @@ jobs:
             exit 1
           fi
 
-          SUMMARY=$(echo "$RESPONSE"     | python3 -c "import sys,json; print(json.load(sys.stdin)['fields']['summary'])")
+          SUMMARY=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin)['fields']['summary'])")
           DESCRIPTION=$(echo "$RESPONSE" | python3 -c "
           import sys, json
           d = json.load(sys.stdin)['fields'].get('description') or {}
-          # Jira returns Atlassian Document Format (ADF); flatten to plain text
           def extract(node):
               if isinstance(node, str): return node
               if isinstance(node, dict):
@@ -88,7 +105,7 @@ jobs:
             echo "EOF_DESCRIPTION"
           } >> "$GITHUB_OUTPUT"
 
-      # ── 4. Set up Python ────────────────────────────────────────────────
+      # ── 5. Set up Python ───────────────────────────────────────────────────
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -97,17 +114,17 @@ jobs:
       - name: Install dependencies
         run: pip install google-generativeai PyGithub
 
-      # ── 5. Run Gemini & open PR ─────────────────────────────────────────
+      # ── 6. Run Gemini & open PR ────────────────────────────────────────────
       - name: Gemini — generate fix & open PR
         env:
-          GEMINI_API_KEY:      ${{ secrets.GEMINI_API_KEY }}
-          GEMINI_MODEL:        ${{ vars.GEMINI_MODEL || 'gemini-2.5-flash' }}
-          GITHUB_TOKEN:        ${{ secrets.GITHUB_TOKEN }}
-          REPO:                ${{ github.repository }}
-          BASE_BRANCH:         ${{ github.event.repository.default_branch }}
-          HEAD_BRANCH:         ${{ github.ref_name }}
-          TICKET_ID:           ${{ steps.ticket.outputs.id }}
-          JIRA_BASE_URL:       ${{ secrets.JIRA_BASE_URL }}
-          TICKET_SUMMARY:      ${{ steps.jira.outputs.summary }}
-          TICKET_DESCRIPTION:  ${{ steps.jira.outputs.description }}
+          GEMINI_API_KEY:     ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL:       ${{ vars.GEMINI_MODEL || 'gemini-2.5-flash' }}
+          GITHUB_TOKEN:       ${{ secrets.GITHUB_TOKEN }}
+          REPO:               ${{ github.repository }}
+          BASE_BRANCH:        ${{ github.event.repository.default_branch }}
+          HEAD_BRANCH:        ${{ steps.branch.outputs.name }}
+          TICKET_ID:          ${{ steps.ticket.outputs.id }}
+          JIRA_BASE_URL:      ${{ secrets.JIRA_BASE_URL }}
+          TICKET_SUMMARY:     ${{ steps.jira.outputs.summary }}
+          TICKET_DESCRIPTION: ${{ steps.jira.outputs.description }}
         run: python scripts/gemini_autofix.py
