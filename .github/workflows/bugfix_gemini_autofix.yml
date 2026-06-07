@@ -10,32 +10,23 @@ jobs:
     runs-on: ubuntu-latest
 
     permissions:
-      contents: write        # push the fix commit
-      pull-requests: write   # open the PR
+      contents: write
+      pull-requests: write
 
     steps:
-      # ── 1. Resolve branch name ─────────────────────────────────────────────
-      # Hardcoded to bugfix/MOB-29 — change this to target a different ticket
-      - name: Resolve branch name
-        id: branch
-        run: |
-          BRANCH="bugfix/MOB-29"
-          echo "name=$BRANCH" >> "$GITHUB_OUTPUT"
-          echo "✅ Branch resolved: $BRANCH"
-
-      # ── 2. Checkout ────────────────────────────────────────────────────────
-      - name: Checkout branch
+      # ── 1. Checkout ────────────────────────────────────────────────────────
+      - name: Checkout bugfix branch
         uses: actions/checkout@v4
         with:
-          ref: ${{ steps.branch.outputs.name }}
+          ref: bugfix/MOB-29
           fetch-depth: 0
 
-      # ── 3. Parse ticket number from branch name ────────────────────────────
+      # ── 2. Extract Jira ticket ID from branch name ─────────────────────────
       - name: Extract Jira ticket ID
         id: ticket
         run: |
-          BRANCH="${{ steps.branch.outputs.name }}"
-          TICKET="${BRANCH#bugfix/}"                # strip prefix → MOB-29
+          BRANCH="bugfix/MOB-29"
+          TICKET="${BRANCH#bugfix/}"
 
           if [[ ! "$TICKET" =~ ^[A-Z]+-[0-9]+$ ]]; then
             echo "::error::Branch '$BRANCH' does not contain a valid Jira ticket (expected bugfix/PROJ-123)"
@@ -45,7 +36,7 @@ jobs:
           echo "id=$TICKET" >> "$GITHUB_OUTPUT"
           echo "✅ Ticket extracted: $TICKET"
 
-      # ── 4. Fetch Jira ticket description ───────────────────────────────────
+      # ── 3. Fetch Jira ticket ───────────────────────────────────────────────
       - name: Fetch Jira ticket
         id: jira
         env:
@@ -58,11 +49,10 @@ jobs:
             -H "Accept: application/json" \
             "$JIRA_BASE_URL/rest/api/3/issue/$TICKET_ID")
 
-          # Bail out if the ticket wasn't found
           if echo "$RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); sys.exit(0 if 'fields' in d else 1)"; then
-            echo "✅ Ticket fetched"
+            echo "✅ Ticket fetched successfully"
           else
-            echo "::error::Could not fetch Jira ticket '$TICKET_ID'. Response: $RESPONSE"
+            echo "::error::Could not fetch Jira ticket. Response: $RESPONSE"
             exit 1
           fi
 
@@ -85,7 +75,6 @@ jobs:
           echo "── Jira Description ──────────────────────────"
           echo "$DESCRIPTION"
 
-          # Pass to subsequent steps via outputs (safe multi-line export)
           {
             echo "summary<<EOF_SUMMARY"
             echo "$SUMMARY"
@@ -95,26 +84,183 @@ jobs:
             echo "EOF_DESCRIPTION"
           } >> "$GITHUB_OUTPUT"
 
-      # ── 5. Set up Python ───────────────────────────────────────────────────
+      # ── 4. Setup Python & install Gemini SDK ──────────────────────────────
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install google-generativeai PyGithub
+        run: pip install google-generativeai
 
-      # ── 6. Run Gemini & open PR ────────────────────────────────────────────
-      - name: Gemini — generate fix & open PR
+      # ── 5. Get repo diff ───────────────────────────────────────────────────
+      - name: Get diff of bugfix branch vs main
+        id: diff
+        run: |
+          git fetch origin main --depth=1
+
+          DIFF=$(git diff origin/main...HEAD || true)
+
+          if [ -z "$DIFF" ]; then
+            DIFF="No existing diff — branch was just created. Analyse the ticket and apply the fix from scratch."
+          fi
+
+          # Truncate to 80000 chars to stay within Gemini limits
+          DIFF="${DIFF:0:80000}"
+
+          {
+            echo "content<<EOF_DIFF"
+            echo "$DIFF"
+            echo "EOF_DIFF"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "✅ Diff captured (${#DIFF} chars)"
+
+      # ── 6. Call Gemini & apply fix ─────────────────────────────────────────
+      - name: Call Gemini and apply fix
+        id: gemini
         env:
           GEMINI_API_KEY:     ${{ secrets.GEMINI_API_KEY }}
           GEMINI_MODEL:       ${{ vars.GEMINI_MODEL || 'gemini-2.5-flash' }}
-          GITHUB_TOKEN:       ${{ secrets.GITHUB_TOKEN }}
-          REPO:               ${{ github.repository }}
-          BASE_BRANCH:        ${{ github.event.repository.default_branch }}
-          HEAD_BRANCH:        ${{ steps.branch.outputs.name }}
           TICKET_ID:          ${{ steps.ticket.outputs.id }}
-          JIRA_BASE_URL:      ${{ secrets.JIRA_BASE_URL }}
           TICKET_SUMMARY:     ${{ steps.jira.outputs.summary }}
           TICKET_DESCRIPTION: ${{ steps.jira.outputs.description }}
-        run: python scripts/gemini_autofix.py
+          DIFF_CONTENT:       ${{ steps.diff.outputs.content }}
+          JIRA_BASE_URL:      ${{ secrets.JIRA_BASE_URL }}
+        run: |
+          python3 << 'PYTHON_EOF'
+          import google.generativeai as genai
+          import os, json, textwrap
+          from pathlib import Path
+
+          genai.configure(api_key=os.environ["GEMINI_API_KEY"])
+          model = genai.GenerativeModel(os.environ["GEMINI_MODEL"])
+
+          ticket_id    = os.environ["TICKET_ID"]
+          summary      = os.environ["TICKET_SUMMARY"]
+          description  = os.environ["TICKET_DESCRIPTION"]
+          diff         = os.environ["DIFF_CONTENT"]
+          jira_url     = os.environ.get("JIRA_BASE_URL", "").rstrip("/")
+
+          prompt = textwrap.dedent(f"""
+          You are an expert software engineer performing a bugfix.
+
+          ## Jira Ticket
+          - ID: {ticket_id}  ({jira_url}/browse/{ticket_id})
+          - Summary: {summary}
+          - Description: {description}
+
+          ## Current branch diff vs main
+          ```diff
+          {diff}
+          ```
+
+          ## Task
+          Analyse the ticket and produce the minimal correct fix.
+
+          Respond ONLY with a valid JSON object — no markdown fences, no extra text:
+          {{
+            "pr_title": "<concise PR title>",
+            "pr_body": "<markdown PR description: what changed and why>",
+            "changed_files": [
+              {{
+                "path": "<relative file path from repo root>",
+                "content": "<complete new file content — NOT a diff>"
+              }}
+            ]
+          }}
+
+          Rules:
+          - Only include files that need to change.
+          - Preserve existing code style and formatting.
+          - No unrelated refactors or comments.
+          - If no code change is needed, return empty changed_files and explain in pr_body.
+          """).strip()
+
+          print("🤖 Calling Gemini...")
+          response = model.generate_content(prompt)
+          raw = response.text.strip()
+
+          # Strip accidental markdown fences
+          if raw.startswith("```"):
+              raw = raw.split("```", 2)[1]
+              if raw.startswith("json"):
+                  raw = raw[4:]
+              raw = raw.rsplit("```", 1)[0].strip()
+
+          result = json.loads(raw)
+
+          pr_title = result.get("pr_title", f"fix({ticket_id}): Gemini-generated bugfix")
+          pr_body  = result.get("pr_body", "Automated fix generated by Gemini.")
+          files    = result.get("changed_files", [])
+
+          print(f"📝 PR Title : {pr_title}")
+          print(f"📂 Files    : {[f['path'] for f in files]}")
+
+          # Write changed files to disk
+          for entry in files:
+              path = Path(entry["path"])
+              path.parent.mkdir(parents=True, exist_ok=True)
+              path.write_text(entry["content"])
+              print(f"  ✏️  Written: {path}")
+
+          # Save PR title/body for next step
+          with open("pr_title.txt", "w") as f: f.write(pr_title)
+          with open("pr_body.txt",  "w") as f: f.write(pr_body)
+
+          print("✅ Gemini fix applied to disk")
+          PYTHON_EOF
+
+      # ── 7. Commit & push fix ───────────────────────────────────────────────
+      - name: Commit and push fix
+        id: commit
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+
+          if git diff --cached --quiet; then
+            echo "nothing_to_commit=true" >> "$GITHUB_OUTPUT"
+            echo "⚠️  No file changes — skipping commit"
+          else
+            TICKET_ID="${{ steps.ticket.outputs.id }}"
+            git commit -m "fix($TICKET_ID): apply Gemini-generated bugfix"
+            git push origin HEAD:bugfix/MOB-29
+            echo "nothing_to_commit=false" >> "$GITHUB_OUTPUT"
+            echo "✅ Pushed fix to bugfix/MOB-29"
+          fi
+
+      # ── 8. Open Pull Request ───────────────────────────────────────────────
+      - name: Open Pull Request
+        if: steps.commit.outputs.nothing_to_commit == 'false'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO:         ${{ github.repository }}
+        run: |
+          PR_TITLE=$(cat pr_title.txt)
+          PR_BODY=$(cat pr_body.txt)
+
+          # Check if PR already exists
+          EXISTING=$(curl -s \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$REPO/pulls?state=open&head=${REPO%%/*}:bugfix/MOB-29" \
+            | python3 -c "import sys,json; prs=json.load(sys.stdin); print(prs[0]['number'] if prs else '')")
+
+          if [ -n "$EXISTING" ]; then
+            # Update existing PR
+            curl -s -X PATCH \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/$REPO/pulls/$EXISTING" \
+              -d "$(python3 -c "import json,sys; print(json.dumps({'title': open('pr_title.txt').read(), 'body': open('pr_body.txt').read()}))")"
+            echo "✅ Updated existing PR #$EXISTING"
+          else
+            # Create new PR
+            curl -s -X POST \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/$REPO/pulls" \
+              -d "$(python3 -c "import json; print(json.dumps({'title': open('pr_title.txt').read(), 'body': open('pr_body.txt').read(), 'head': 'bugfix/MOB-29', 'base': 'main'}))")"
+            echo "✅ Opened new PR: bugfix/MOB-29 → main"
+          fi
