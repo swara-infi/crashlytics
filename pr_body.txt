@@ -1,0 +1,3 @@
+Updated the error message for missing JIRA_URL environment variable in `jira_client.py`.
+
+The previous message 'JIRA_URL environment variable is not set' has been changed to 'Missing JIRA_URL environment variable. Please configure it in your settings.' to provide clearer guidance to the user, as per ticket MOB-38.
