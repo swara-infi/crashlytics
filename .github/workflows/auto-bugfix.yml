@@ -1,15 +1,9 @@
 name: Bugfix Branch — Jira Fetch & Gemini Auto-Fix
 
 on:
-  workflow_dispatch:
-    inputs:
-      branch_name:
-        description: "Bugfix branch name (e.g. bugfix/MOB-29)"
-        required: false
-        default: "bugfix/MOB-29"
   push:
     branches:
-      - "bugfix/**"
+      - "main"
 
 jobs:
   gemini-autofix:
@@ -21,15 +15,11 @@ jobs:
 
     steps:
       # ── 1. Resolve branch name ─────────────────────────────────────────────
-      # For workflow_dispatch: use the input; for push: use the pushed branch
+      # Hardcoded to bugfix/MOB-29 — change this to target a different ticket
       - name: Resolve branch name
         id: branch
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            BRANCH="${{ github.event.inputs.branch_name }}"
-          else
-            BRANCH="${GITHUB_REF_NAME}"
-          fi
+          BRANCH="bugfix/MOB-29"
           echo "name=$BRANCH" >> "$GITHUB_OUTPUT"
           echo "✅ Branch resolved: $BRANCH"
 
