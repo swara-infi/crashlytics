@@ -21,7 +21,7 @@ jobs:
           ref: bugfix/MOB-29
           fetch-depth: 0
 
-      # ── 2. Extract Jira ticket ID from branch name ─────────────────────────
+      # ── 2. Extract Jira ticket ID from branch  name ─────────────────────────
       - name: Extract Jira ticket ID
         id: ticket
         run: |
